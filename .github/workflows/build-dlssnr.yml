@@ -1,0 +1,96 @@
+name: Build DLSS-NR
+
+# Fork friendly variant of .github/workflows/build.yml.
+#
+# Differences from build.yml, all deliberate:
+#   * triggers on every branch plus workflow_dispatch, because the upstream workflow only runs
+#     on main and release/**, so a fork's feature branch would otherwise get no CI at all
+#   * fail-fast disabled, so a failing debug leg does not cancel the release leg you want
+#   * no bridge build and no x86 artifact --- this workflow exists to produce the x64
+#     _output/d3d9.dll (plus the optional remix_nvngx.dll) for a DLSS-NR test drop
+#   * no Slack notification job, since forks do not have SLACK_WEBHOOK_URL
+#
+# Everything else --- runner image, submodules, the pinned Meson version, the build driver
+# invocation --- is kept identical to build.yml on purpose.
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    env:
+      BUILD_SENTRY_ENVIRONMENT: ${{ github.event_name == 'pull_request' && 'github-testing' || 'github-production' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build-flavour: debugoptimized
+            output-subdir: _Comp64DebugOptimized
+          - build-flavour: release
+            output-subdir: _Comp64Release
+
+    steps:
+    - name: Setup variables
+      uses: actions/github-script@v9
+      with:
+        script: core.exportVariable('GITHUB_SHA_SHORT', context.sha.substring(0, 7))
+
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Setup Meson
+      run: pip install meson==1.1.0
+
+    - name: Build
+      shell: pwsh
+      run: |
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+        . .\build_common.ps1
+        PerformBuild -BuildFlavour ${{matrix.build-flavour}} -BuildSubDir ${{matrix.output-subdir}} -Backend ninja -EnableTracy false copy_output
+
+    - name: Upload build logs
+      if: ${{ always() }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-logs-${{github.run_number}}-${{env.GITHUB_SHA_SHORT}}-${{matrix.build-flavour}}
+        path: |
+          ${{matrix.output-subdir}}\meson-logs\meson-log.txt
+          ${{matrix.output-subdir}}\update-deps.log
+          update-deps.log
+        if-no-files-found: ignore
+        retention-days: 30
+
+    # The DLSS-NR pass needs nvngx_dlssnr.dll next to d3d9.dll; that snippet is never committed
+    # and has to be dropped in by hand. remix_nvngx.dll is the optional call trampoline, built
+    # from src/dlssnr_shim and installed into _output by its own install script in the root
+    # meson.build --- the runtime calls the snippet directly when it is absent. This step only
+    # guards against the shim target silently not building at all.
+    - name: Verify DLSS-NR trampoline was produced
+      shell: pwsh
+      run: |
+        if (-not (Test-Path _output\remix_nvngx.dll)) {
+          Write-Error "remix_nvngx.dll missing from _output --- the DLSS-NR trampoline did not build or did not install." -ErrorAction Stop
+        }
+        Get-ChildItem _output\d3d9.dll, _output\remix_nvngx.dll | Format-Table Name, Length, LastWriteTime
+
+    - name: Copy readme
+      run: copy artifacts_readme.txt _output
+
+    - name: Upload x64 binaries
+      uses: actions/upload-artifact@v7
+      with:
+        name: rtx-remix-dlssnr-x64-${{github.run_number}}-${{env.GITHUB_SHA_SHORT}}-${{matrix.build-flavour}}
+        path: |
+          _output\*.dll
+          _output\*.pdb
+          _output\*.txt
+          _output\usd\*

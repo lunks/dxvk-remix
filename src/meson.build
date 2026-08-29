@@ -5,6 +5,9 @@ subdir('spirv')
 subdir('vulkan')
 subdir('lssusd')
 subdir('dxvk')
+# NV-DXVK start: DLSS-NR call trampoline
+subdir('dlssnr_shim')
+# NV-DXVK end
 
 if get_option('enable_dxgi')
   if not get_option('enable_d3d11')

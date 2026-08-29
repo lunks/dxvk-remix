@@ -742,6 +742,11 @@ namespace dxvk {
         }
         m_previousUpscaler = m_currentUpscaler;
 
+        // DLSS Neural Rendering enhances the already resolved image, so it has to run after
+        // whichever upscaler ran above (including the plain copy) and before every post-process.
+        // It is a no-op unless the DLSS-NR snippet is present.
+        dispatchNeuralRendering(rtOutput);
+
         RtxDustParticles& dust = m_common->metaDustParticles();
         dust.simulateAndDraw(this, m_state, rtOutput);
 
@@ -1723,6 +1728,11 @@ namespace dxvk {
   void RtxContext::dispatchRayReconstruction(const Resources::RaytracingOutput& rtOutput) {
     DxvkRayReconstruction& rayReconstruction = m_common->metaRayReconstruction();
     rayReconstruction.dispatch(this, m_execBarriers, rtOutput, m_resetHistory, GlobalTime::get().deltaTimeMs());
+  }
+
+  void RtxContext::dispatchNeuralRendering(const Resources::RaytracingOutput& rtOutput) {
+    DxvkNeuralRendering& neuralRendering = m_common->metaNeuralRendering();
+    neuralRendering.dispatch(this, m_execBarriers, rtOutput, m_resetHistory);
   }
 
   void RtxContext::dispatchNIS(const Resources::RaytracingOutput& rtOutput) {

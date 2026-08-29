@@ -193,6 +193,7 @@ namespace dxvk {
     void dispatchNeeCache(const Resources::RaytracingOutput& rtOutput);
     void dispatchDLSS(const Resources::RaytracingOutput& rtOutput);
     void dispatchRayReconstruction(const Resources::RaytracingOutput& rtOutput);
+    void dispatchNeuralRendering(const Resources::RaytracingOutput& rtOutput);
     void dispatchDenoise(const Resources::RaytracingOutput& rtOutput);
     void dispatchComposite(const Resources::RaytracingOutput& rtOutput);
     void dispatchReplaceCompositeWithDebugView(const Resources::RaytracingOutput& rtOutput);

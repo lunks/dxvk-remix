@@ -43,6 +43,9 @@
 #include "rtx_render/rtx_ngx_wrapper.h"
 #include "rtx_render/rtx_dlfg.h"
 #include "rtx_render/rtx_dlss.h"
+// NV-DXVK start: DLSS-NR
+#include "rtx_render/rtx_neural_rendering.h"
+// NV-DXVK end
 #include "rtx_render/rtx_nis.h"
 #include "rtx_render/rtx_taa.h"
 #include "rtx_render/rtx_auto_exposure.h"
@@ -219,6 +222,12 @@ namespace dxvk {
       return m_rayReconstruction.get();
     }
 
+    // NV-DXVK start: DLSS-NR
+    DxvkNeuralRendering& metaNeuralRendering() {
+      return m_neuralRendering.get();
+    }
+    // NV-DXVK end
+
     DxvkDLFG& metaDLFG() {
       return m_dlfg.get();
     }
@@ -392,6 +401,9 @@ namespace dxvk {
     Active<DxvkDenoise>                     m_referenceDenoiserSecondLobe2;
     Active<DxvkDLSS>                        m_dlss;
     Active<DxvkRayReconstruction>           m_rayReconstruction;
+    // NV-DXVK start: DLSS-NR
+    Active<DxvkNeuralRendering>             m_neuralRendering;
+    // NV-DXVK end
     Active<DxvkNIS>                         m_nis;
     Active<DxvkTemporalAA>                  m_taa;
     Active<DxvkXeSS>                        m_xess;

@@ -879,6 +879,20 @@ if dxvk_is_ninja or dxvk_is_woa_ec
       )
     endif
 
+    # NV-DXVK start: DLSS-NR call trampoline. Ships next to d3d9.dll so it is available to a
+    # snippet build that enforces the "called from NGX runtime" caller check; the runtime calls
+    # the snippet directly when it is absent.
+    # Note: deliberately NOT wrapped in the `if t != '_output'` guard the d3d9.dll copy above
+    # uses. That guard is a no-op anyway --- `t` is left over from the earlier
+    # `foreach t, exe : dxvkrt_output_targets` loop and is never '_output' here --- so copying
+    # it would only obscure the intent, which is to install for every copy target.
+    meson.add_install_script(
+      join_paths(global_src_root_norm, 'scripts-common/install_file_in_dir.bat'),
+      join_paths(current_build_dir_norm, 'src/dlssnr_shim', 'remix_nvngx.dll'), output_path,
+      install_tag: target_suffix
+    )
+    # NV-DXVK end
+
     if requires_pdb
 	  # ensure we copy everything to these special targets, the PDB is important!
       meson.add_install_script(
