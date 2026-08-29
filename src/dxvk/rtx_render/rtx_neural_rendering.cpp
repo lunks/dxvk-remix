@@ -158,7 +158,20 @@ namespace dxvk {
     ctx->setFramePassStage(RtxFramePassStage::NeuralRendering);
 
     // NV-DXVK start: DLSS-NR
-    if (!isActive() || !m_neuralRenderingOutput.isValid() || !m_neuralRenderingProxy.isValid()) {
+    // Note: each condition is reported separately and once. A silent return here is
+    // indistinguishable from the pass working perfectly, which has already cost one round of
+    // hardware testing --- the frame looks correct either way.
+    if (!isActive()) {
+      ONCE(Logger::info("NVIDIA DLSS-NR inactive: the pass is not enabled for this frame."));
+      return;
+    }
+
+    if (!m_neuralRenderingOutput.isValid() || !m_neuralRenderingProxy.isValid()) {
+      ONCE(Logger::warn(str::format(
+        "NVIDIA DLSS-NR skipped: pass targets are not allocated (output valid: ",
+        m_neuralRenderingOutput.isValid() ? "yes" : "no",
+        ", proxy valid: ", m_neuralRenderingProxy.isValid() ? "yes" : "no",
+        "). createTargetResource() has not run for this resolution.")));
       return;
     }
     // NV-DXVK end
@@ -379,6 +392,18 @@ namespace dxvk {
       settings.useAutoMask = useAutoMask();
 
       const bool evaluated = m_neuralRenderingContext->evaluateNeuralRendering(ctx, buffers, settings);
+
+      // Note: without this the only positive evidence that the feature ran is the absence of an
+      // error, and "running correctly" then looks exactly like "silently doing nothing".
+      if (evaluated) {
+        ++m_evaluateCount;
+        if (m_evaluateCount == 1 || m_evaluateCount == 100) {
+          Logger::info(str::format(
+            "NVIDIA DLSS-NR evaluated (count=", m_evaluateCount,
+            ", colour ", colorExtent.width, "x", colorExtent.height,
+            ", guides ", guideExtent.width, "x", guideExtent.height, ")"));
+        }
+      }
 
       for (auto output : pOutputs) {
         barriers.accessImage(

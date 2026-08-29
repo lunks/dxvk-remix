@@ -196,6 +196,7 @@ namespace dxvk {
 
     std::unique_ptr<NGXNeuralRenderingContext> m_neuralRenderingContext;
     bool m_contextCreationFailed = false;
+    uint64_t m_evaluateCount = 0;
     bool m_loggedGuideResolutionMismatch = false;
     // NV-DXVK start: DLSS-NR
     // The guide grid the live temporal history was accumulated against. The NGX feature is
