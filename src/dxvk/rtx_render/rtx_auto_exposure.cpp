@@ -202,6 +202,38 @@ namespace dxvk {
     m_exposure.view = device()->createImageView(m_exposure.image, viewInfo);
     ctx->changeImageLayout(m_exposure.image, VK_IMAGE_LAYOUT_GENERAL);
 
+    // NV-DXVK start: DLSS-NR
+    // Seed the exposure with the same neutral value dispatchAutoExposure() clears it to. Without
+    // this the allocation is only transitioned out of VK_IMAGE_LAYOUT_UNDEFINED and is never
+    // written, so anything that reads it before the first DxvkAutoExposure::dispatch samples
+    // uninitialised memory. There are three such readers:
+    //
+    //   * the DLSS indicator, which is why rtx_context.cpp:721 already calls this function early
+    //     "otherwise we run into trouble on the first frame" --- creating the image was not
+    //     actually enough to fix that;
+    //   * the DLSS-NR HDR colour codec at rtx_context.cpp:748, ten lines before
+    //     dispatchToneMapping at 758. That one DIVIDES by this value, so a zero read becomes the
+    //     clamp floor in neuralRenderingProxyScale() and the decode's reciprocal turns the whole
+    //     frame white;
+    //   * every frame spent in DEBUG_VIEW_PRE_TONEMAP_OUTPUT, where dispatchToneMapping returns
+    //     at rtx_context.cpp:1799 before the auto exposure pass runs at all, so the garbage would
+    //     otherwise never be replaced.
+    //
+    // exp2f(0.0f) == 1.0f is the identity exposure, i.e. exactly what a reader gets with
+    // rtx.autoExposure.enabled set to False.
+    {
+      VkClearColorValue clearColor;
+      clearColor.float32[0] = clearColor.float32[1] = clearColor.float32[2] = clearColor.float32[3] = exp2f(0.0f);
+
+      VkImageSubresourceRange subRange = {};
+      subRange.layerCount = 1;
+      subRange.levelCount = 1;
+      subRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      ctx->clearColorImage(m_exposure.image, clearColor, subRange);
+    }
+    // NV-DXVK end
+
     desc.extent = VkExtent3D { EXPOSURE_HISTOGRAM_SIZE, 1, 1 };
     viewInfo.format = desc.format = VK_FORMAT_R32_UINT;
     viewInfo.usage = desc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;

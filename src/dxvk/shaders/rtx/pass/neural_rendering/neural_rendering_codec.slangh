@@ -1,0 +1,134 @@
+/*
+* Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+#include "rtx/utility/color.slangh"
+
+// NV-DXVK start: DLSS-NR
+// Shared halves of the DLSS-NR HDR colour codec. The encode and the decode MUST agree on the
+// transfer functions below, so they live here rather than being written out twice.
+
+// Exact piecewise sRGB, deliberately NOT color.slangh's linearToGamma/gammaToLinear: those
+// approximate sRGB with x^2.2 and say so in their own comment. The network was trained on true
+// sRGB imagery, and RenoDX --- the only known working DLSS-NR deployment --- feeds it the exact
+// piecewise curve, so match that.
+//
+// Written with per channel scalar ternaries rather than a vector select so the source stays
+// valid regardless of which HLSL vector-conditional rules the Slang front end applies.
+
+float3 neuralRenderingSrgbEncode(float3 color)
+{
+  color = saturate(color);
+
+  const float3 toe = color * 12.92f;
+  // Note: color is already saturated, so the max() only guards pow(0, 1/2.4) on hardware that
+  // is unhappy with an exact zero base.
+  const float3 shoulder = 1.055f * pow(max(color, 0.00000001f), float3(1.0f / 2.4f)) - 0.055f;
+
+  return float3(
+    color.r <= 0.0031308f ? toe.r : shoulder.r,
+    color.g <= 0.0031308f ? toe.g : shoulder.g,
+    color.b <= 0.0031308f ? toe.b : shoulder.b);
+}
+
+float3 neuralRenderingSrgbDecode(float3 color)
+{
+  color = saturate(color);
+
+  const float3 toe = color / 12.92f;
+  const float3 shoulder = pow(max((color + 0.055f) / 1.055f, 0.0f), float3(2.4f));
+
+  return float3(
+    color.r <= 0.04045f ? toe.r : shoulder.r,
+    color.g <= 0.04045f ? toe.g : shoulder.g,
+    color.b <= 0.04045f ? toe.b : shoulder.b);
+}
+
+// Soft clip shoulder, verbatim from the RenoDX DLSS5 encoder. Continuous in value at the knee,
+// asymptotic to exactly 1.0, so no amount of input radiance can push the proxy out of the
+// [0, 1] domain sRGB encoding expects.
+//
+// Note: 0.25 * 5.770780 = 1.442695 = 1/ln(2), so the slope jumps from 1.0 to ~1.44 at the knee
+// --- this curve is C0 but not C1. That is what the known working deployment ships, so it is
+// reproduced exactly rather than "corrected"; see PATCH-NOTES-FIX.md.
+static const float kNeuralRenderingSoftClipKnee = 0.75f;
+static const float kNeuralRenderingSoftClipShoulder = 5.770780f;
+
+float neuralRenderingSoftClipChannel(float value)
+{
+  if (value <= kNeuralRenderingSoftClipKnee)
+  {
+    return value;
+  }
+
+  const float headroom = 1.0f - kNeuralRenderingSoftClipKnee;
+
+  return kNeuralRenderingSoftClipKnee
+       + headroom * (1.0f - exp(-kNeuralRenderingSoftClipShoulder * (value - kNeuralRenderingSoftClipKnee)));
+}
+
+float3 neuralRenderingSoftClip(float3 color)
+{
+  return float3(
+    neuralRenderingSoftClipChannel(color.r),
+    neuralRenderingSoftClipChannel(color.g),
+    neuralRenderingSoftClipChannel(color.b));
+}
+
+// Scene linear radiance -> display referred, "diffuse white is about 1.0" units.
+//
+// Remix has no paper white concept of its own (there is no HDR swapchain path anywhere in the
+// runtime), but it does have the scalar that maps scene linear radiance onto display referred
+// values: the tonemapper's exposure. Reuse it so the knee above lands in the right place as
+// the scene brightness changes, instead of inventing a second, unrelated constant.
+//
+// Note: at rtx_context.cpp:748 the exposure texture still holds the PREVIOUS frame's value,
+// because DxvkAutoExposure::dispatch only runs from dispatchToneMapping at line 758. It is
+// heavily temporally smoothed (rtx.autoExposure.autoExposureSpeed defaults to 5 units/second),
+// so a one frame lag is not visible --- and both the encode and the decode read the same
+// texel in the same frame, so they never disagree with each other.
+float neuralRenderingProxyScale(RWTexture1D<float> exposureTexture, bool enableAutoExposure, float staticScale)
+{
+  float scale = staticScale;
+
+  if (enableAutoExposure)
+  {
+    scale *= exposureTexture[0].r;
+  }
+
+  // Note: DxvkAutoExposure::dispatch runs ten lines further down the frame than this pass
+  // (rtx_context.cpp:748 vs 758), so the value read here is one frame old --- and on the very
+  // first frame it is the neutral exp2(0) == 1.0 that DxvkAutoExposure::createResources now
+  // seeds the texture with. It used to be uninitialised memory: creating the image only
+  // transitioned it out of VK_IMAGE_LAYOUT_UNDEFINED, and a zero read would have driven the
+  // clamp below to its floor, collapsed the proxy to black and made the decode's reciprocal
+  // multiply the whole frame by a million. The clamp and the non-finite rejection stay as a
+  // backstop, not as the primary defence: the real auto exposure values are bounded by
+  // rtx.autoExposure.evMinValue/evMaxValue and never come near either limit.
+  if (isnan(scale) || isinf(scale))
+  {
+    scale = staticScale;
+  }
+
+  return clamp(scale, 0.000001f, 1000000.0f);
+}
+// NV-DXVK end

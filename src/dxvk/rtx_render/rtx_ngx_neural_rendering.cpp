@@ -73,8 +73,16 @@ namespace dxvk {
 
     constexpr const char* kParamWidth = "DLSSNR.Width";
     constexpr const char* kParamHeight = "DLSSNR.Height";
+    // NV-DXVK start: DLSS-NR
+    // Note: DLSSNR.InputWidth/InputHeight are INERT with this snippet --- neither string exists
+    // anywhere in nvngx_dlssnr.dll, and CreateFeature reads only DLSSNR.Width/DLSSNR.Height
+    // ("CreateFeature begin requested resolution %ux%u (network %ux%u)" is fed from that one
+    // pair, twice). They are still set, and still set to the colour grid, because they are the
+    // documented spelling for "the resource bound as DLSSNR.Color" and a future snippet build
+    // may start reading them --- but no behaviour may be predicated on them.
     constexpr const char* kParamInputWidth = "DLSSNR.InputWidth";
     constexpr const char* kParamInputHeight = "DLSSNR.InputHeight";
+    // NV-DXVK end
     constexpr const char* kParamEnabled = "DLSSNR.Enabled";
     constexpr const char* kParamReset = "DLSSNR.Reset";
     constexpr const char* kParamDepthInverted = "DLSSNR.DepthInverted";
@@ -579,10 +587,18 @@ namespace dxvk {
     // "preset %d is not available in this DLL build" and loads the same weights anyway.
     m_parameters->Set(kParamRenderPreset, kOnlyPreset);
 
+    // NV-DXVK start: DLSS-NR
+    // Note: DLSSNR.ScalingRatio is DEAD in this snippet build. Three separate sites read it and
+    // then unconditionally store 1.0f over the result --- uniquely among the float parameters it
+    // has no "was it actually set" guard --- so this write can never change anything. It is kept
+    // because it is harmless and correct, but it is exactly 1.0 here anyway: this pass does not
+    // upscale, so the input and output grids are both the colour grid. Nothing may be predicated
+    // on this value.
     const float scalingRatio = inputSize[1] != 0
       ? static_cast<float>(outputSize[1]) / static_cast<float>(inputSize[1])
       : 1.0f;
     m_parameters->Set(kParamScalingRatio, scalingRatio);
+    // NV-DXVK end
 
     // Release video memory when DLSS-NR is disabled.
     m_parameters->Set(NVSDK_NGX_Parameter_FreeMemOnReleaseFeature, 1);
@@ -631,10 +647,17 @@ namespace dxvk {
     ScopedCpuProfileZone();
 
     // Color, Depth, MVec and Output are not optional for this feature.
-    if (buffers.pColor == nullptr || buffers.pDepth == nullptr ||
-        buffers.pMotionVectors == nullptr || buffers.pOutput == nullptr) {
+    // NV-DXVK start: DLSS-NR
+    // Note: this checks isValid(), not just the pointer --- the extents below dereference
+    // ->image directly, and a Resources::Resource can legally exist with a null image/view (for
+    // instance a target texture that has not been recreated yet after a resolution change).
+    if (buffers.pColor == nullptr || !buffers.pColor->isValid() ||
+        buffers.pDepth == nullptr || !buffers.pDepth->isValid() ||
+        buffers.pMotionVectors == nullptr || !buffers.pMotionVectors->isValid() ||
+        buffers.pOutput == nullptr || !buffers.pOutput->isValid()) {
       return false;
     }
+    // NV-DXVK end
 
     VkCommandBuffer vkCommandbuffer = renderContext->getCommandList()->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
 
@@ -681,10 +704,22 @@ namespace dxvk {
       m_parameters->Set(names.subrectHeight.c_str(), static_cast<unsigned int>(0));
     };
 
+    // NV-DXVK start: DLSS-NR
+    // Every resource is described by ITS OWN dimensions, which is what makes colour at output
+    // resolution with guides at render resolution work: the snippet validates each rect against
+    // that resource's real size and never compares the guide rects against the colour rect. The
+    // kernel launch block receives the colour rect, the mvec rect and DLSSNR.MVecScaleX/Y as
+    // three independent values.
+    //
+    // The one cross-resource constraint the snippet does enforce is Color vs Output: with both
+    // rects covering their whole resource their dimensions must be equal, or the evaluate is
+    // rejected with "Invalid Color/Output rect configuration". DxvkNeuralRendering satisfies
+    // that by allocating both the proxy and the neural target at the target (colour) extent.
     setResource(s_colorNames, &colorResource, colorExtent.width, colorExtent.height);
     setResource(s_depthNames, &depthResource, depthExtent.width, depthExtent.height);
     setResource(s_motionVectorNames, &motionVectorsResource, motionVectorsExtent.width, motionVectorsExtent.height);
     setResource(s_outputNames, &outputResource, outputExtent.width, outputExtent.height);
+    // NV-DXVK end
 
     const bool hasControlMask = buffers.pControlMask != nullptr && buffers.pControlMask->isValid();
 
