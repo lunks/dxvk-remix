@@ -1,3 +1,91 @@
+# DLSS-NR for RTX Remix
+
+This fork adds **DLSS Neural Rendering** (NVIDIA NGX feature 18, the `nvngx_dlssnr.dll`
+snippet) to the RTX Remix runtime as a post-pass that runs after upscaling and before
+tone mapping.
+
+Verified running in Portal with RTX on an **RTX 4090** at driver **610.43.02**, on Linux
+via Proton — hardware and a driver that NVIDIA's own gates exclude.
+
+## Install
+
+1. Download `d3d9.dll` and `remix_nvngx.dll` from the
+   [latest release](../../releases/latest).
+2. Back up your existing `d3d9.dll`, then drop **both** files into the game's Remix
+   runtime folder, next to the one you replaced (for Portal with RTX that is
+   `PortalRTX/bin/.trex/`).
+3. Put a DLSS-NR snippet named `nvngx_dlssnr.dll` in that same folder. **This is not
+   distributed here** — see below.
+4. Enable it, either in `rtx.conf` / `user.conf`:
+
+   ```ini
+   rtx.neuralRendering.enable = True
+   ```
+
+   or in the Remix developer menu (`Alt+X`) under **Neural Rendering**.
+
+`remix_nvngx.dll` is required, not optional, and must keep that exact filename — every
+gated snippet export checks that its caller's module path contains the substring
+`nvngx.dll`, and this module is what satisfies that. Without it, initialisation fails
+with `0xbad00002` and the feature reports itself unsupported.
+
+### The snippet
+
+`nvngx_dlssnr.dll` is NVIDIA's proprietary DLL and is deliberately **not** included in
+these releases. You must supply your own. It needs to contain **sm_89** cubins: the
+stock snippet ships `sm_120` (Blackwell) only, so on Ada it will load, pass the checks,
+and then fail at kernel load. The network's kernels use FP8 (`e4m3`) tensor ops, so
+**Ada or newer is a hard floor** — Ampere and earlier cannot run it at all, regardless
+of patching.
+
+## Check that it is actually running
+
+The runtime log (`rtx-remix/logs/remix-dxvk.log`) is the only reliable confirmation:
+
+```
+NVIDIA DLSS-NR snippet loaded from ...
+vngx_dlssnr.dll (via remix_nvngx.dll)
+NVIDIA DLSS-NR evaluated (count=1, colour 3840x2160, guides 1920x1080)
+NVIDIA DLSS-NR evaluated (count=100, colour 3840x2160, guides 1920x1080)
+```
+
+`colour` is the output grid and `guides` the render grid; they differ when an upscaler is
+active, which is normal and supported. If you instead see a line beginning
+`NVIDIA DLSS-NR skipped:` or `NVIDIA DLSS-NR inactive:`, it states the reason.
+
+Note the frame can look completely correct while the pass is doing nothing at all, so
+treat the absence of errors as inconclusive and check for an `evaluated` line.
+
+## Settings
+
+All live under `rtx.neuralRendering.` and appear in the developer menu.
+
+| Option | Default | Notes |
+|---|---|---|
+| `enable` | `False` | |
+| `intensity` | `1.0` | |
+| `localToneStrength` | `1.0` | |
+| `localStructureStrength` | `1.0` | Inert unless `useAutoMask` is on and `useControlMask` is off |
+| `skinStructureStrength` | `-1.0` | Negative means "inherit `localStructureStrength`". `0.0` is **not** neutral — it flattens skin structure |
+| `style` | `0` | |
+| `useAutoMask` | `True` | Gates **both** structure strengths |
+| `paperWhiteScale` | `1.0` | HDR codec; raise to brighten what the network sees |
+| `requireMatchingGuideResolution` | `False` | Escape hatch: set `True` to skip the pass when colour and guides differ |
+
+`1.0` is the value the snippet falls back to when the host supplies nothing. It is **not**
+a calibrated neutral midpoint, and these knobs have not been characterised — do not assume
+`2.0` is "double".
+
+There is deliberately no preset selector: the snippet ships exactly one network
+(`CC_SILVER_AARDWOLD`, preset 1) and every other preset value falls back to it.
+
+## Building
+
+`.github/workflows/build-dlssnr.yml` builds this on a Windows runner and uploads
+`d3d9.dll` and `remix_nvngx.dll`. Upstream build instructions are below.
+
+---
+
 # dxvk-remix
 
 [![Build Status](https://github.com/NVIDIAGameWorks/dxvk-remix/actions/workflows/build.yml/badge.svg)](https://github.com/NVIDIAGameWorks/dxvk-remix/actions/workflows/build.yml)
