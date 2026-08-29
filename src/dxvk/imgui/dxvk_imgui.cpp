@@ -420,6 +420,9 @@ namespace dxvk {
       { RtxFramePassStage::XeSS, "XeSS" },
       { RtxFramePassStage::FSR, "FSR" },
       { RtxFramePassStage::TAA, "TAA" },
+      // NV-DXVK start: DLSS-NR
+      { RtxFramePassStage::NeuralRendering, "NeuralRendering" },
+      // NV-DXVK end
       { RtxFramePassStage::DustParticles, "DustParticles" },
       { RtxFramePassStage::Bloom, "Bloom" },
       { RtxFramePassStage::PostFX, "PostFX" },
@@ -3988,6 +3991,12 @@ namespace dxvk {
         if (RemixGui::CollapsingHeader("TAA-U", collapsingHeaderClosedFlags))
           common->metaTAA().showImguiSettings();
       }
+
+      // NV-DXVK start: DLSS-NR. Runs immediately after the upscaler, so it is listed here,
+      // ahead of every other post-process.
+      if (RemixGui::CollapsingHeader("Neural Rendering", collapsingHeaderClosedFlags))
+        common->metaNeuralRendering().showImguiSettings();
+      // NV-DXVK end
 
       if (RemixGui::CollapsingHeader("Bloom", collapsingHeaderClosedFlags))
         common->metaBloom().showImguiSettings();

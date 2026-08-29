@@ -1077,6 +1077,7 @@ enum class RtxFramePassStage {
   XeSS,
   FSR,
   TAA,
+  NeuralRendering,
   DustParticles,
   Bloom,
   PostFX,

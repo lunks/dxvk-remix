@@ -117,6 +117,40 @@ namespace dxvk {
     m_exposure.view = device()->createImageView(m_exposure.image, viewInfo);
     ctx->changeImageLayout(m_exposure.image, VK_IMAGE_LAYOUT_GENERAL);
 
+    // NV-DXVK start: DLSS-NR
+    // Seed the exposure with the same neutral value dispatchAutoExposure() clears it to. Without
+    // this the allocation is only transitioned out of VK_IMAGE_LAYOUT_UNDEFINED and is never
+    // written, so anything that reads it before the first DxvkAutoExposure::dispatch samples
+    // uninitialised memory. There are three such readers:
+    //
+    //   * the DLSS indicator, which is why rtx_context.cpp:738 already calls this function early
+    //     "otherwise we run into trouble on the first frame" --- creating the image was not
+    //     actually enough to fix that;
+    //   * the DLSS-NR HDR colour codec at rtx_context.cpp:769, ten lines before
+    //     dispatchToneMapping at 779. That one DIVIDES by this value, so a zero read becomes the
+    //     clamp floor in neuralRenderingProxyScale() and the decode's reciprocal turns the whole
+    //     frame white;
+    //   * every frame spent in DEBUG_VIEW_PRE_TONEMAP_OUTPUT, where dispatchToneMapping returns
+    //     at rtx_context.cpp:1885 before the auto exposure pass runs at all, so the garbage would
+    //     otherwise never be replaced.
+    //
+    // 1.0f is the identity exposure, i.e. exactly what a reader gets with
+    // rtx.autoExposure.enabled set to False. This matches the literal dispatchAutoExposure() below
+    // uses for the same purpose; the upstream DLSS-NR tree spelled it exp2f(0.0f), which is the
+    // same number but would drag a <cmath> dependency into this file that it does not otherwise have.
+    {
+      VkClearColorValue clearColor;
+      clearColor.float32[0] = clearColor.float32[1] = clearColor.float32[2] = clearColor.float32[3] = 1.0f;
+
+      VkImageSubresourceRange subRange = {};
+      subRange.layerCount = 1;
+      subRange.levelCount = 1;
+      subRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      ctx->clearColorImage(m_exposure.image, clearColor, subRange);
+    }
+    // NV-DXVK end
+
     desc.extent = VkExtent3D { EXPOSURE_HISTOGRAM_SIZE, 1, 1 };
     viewInfo.format = desc.format = VK_FORMAT_R32_UINT;
     viewInfo.usage = desc.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;

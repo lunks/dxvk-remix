@@ -1,0 +1,114 @@
+name: Build DLSS-NR
+
+# Fork friendly variant of .github/workflows/build.yml, for the DLSS-NR (NGX feature 18) port.
+#
+# Differences from build.yml, all deliberate:
+#   * triggers on every branch plus workflow_dispatch, because build.yml only runs on main and
+#     release/**, so a DLSS-NR feature branch would otherwise get no CI at all
+#   * fail-fast disabled, so a failing debugoptimized leg does not cancel the release leg
+#   * only the debugoptimized and release legs --- this workflow exists to produce an x64 test
+#     drop, and the debug leg roughly doubles the wall clock for no extra coverage of this pass
+#   * no bridge build and no x86 artifact. The 32 bit bridge output is not usable by the Dolphin
+#     Remix backend (it is x64 and loads the native runtime), and the .trex/ relocation build.yml
+#     does for the x86 artifact would move the DLLs out from under this workflow's checks
+#   * no Slack notification job, since a fork does not have secrets.SLACK_WEBHOOK_URL
+#   * adds the trampoline verification step below
+#
+# Everything else --- runner image, submodules, the pinned Meson version, the Pillow install, the
+# pinned DLSS/NGX bundle fetch, and the PerformBuild invocation --- is kept byte identical to
+# build.yml on purpose. The Pillow and update-dlss-dlls.ps1 steps are Remix Plus specific and the
+# build fails without them.
+
+on:
+  push:
+    branches: [ '**' ]
+  pull_request:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    env:
+      BUILD_SENTRY_ENVIRONMENT: ${{ github.event_name == 'pull_request' && 'github-testing' || 'github-production' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build-flavour: debugoptimized
+            output-subdir: _Comp64DebugOptimized
+          - build-flavour: release
+            output-subdir: _Comp64Release
+
+    steps:
+    - name: Setup variables
+      uses: actions/github-script@v9
+      with:
+        script: core.exportVariable('GITHUB_SHA_SHORT', context.sha.substring(0, 7))
+
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Setup Meson
+      run: pip install meson==1.1.0
+
+    - name: Install Pillow for FAST-noise embedder
+      run: pip install pillow
+
+    - name: Fetch pinned DLSS / NGX DLL bundle
+      shell: pwsh
+      run: .\scripts\update-dlss-dlls.ps1
+
+    - name: Build
+      shell: pwsh
+      run: |
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+        . .\build_common.ps1
+        PerformBuild -BuildFlavour ${{matrix.build-flavour}} -BuildSubDir ${{matrix.output-subdir}} -Backend ninja -EnableTracy false copy_output
+
+    - name: Upload build logs
+      if: ${{ always() }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v7
+      with:
+        name: build-logs-${{github.run_number}}-${{env.GITHUB_SHA_SHORT}}-${{matrix.build-flavour}}
+        path: |
+          ${{matrix.output-subdir}}\meson-logs\meson-log.txt
+          ${{matrix.output-subdir}}\update-deps.log
+          update-deps.log
+        if-no-files-found: ignore
+        retention-days: 30
+
+    # The DLSS-NR pass needs nvngx_dlssnr.dll next to the runtime; that snippet is never committed
+    # and has to be dropped in by hand. remix_nvngx.dll is the call trampoline, built from
+    # src/dlssnr_shim and installed into _output by its own install script in the root meson.build.
+    # This step guards against the shim target silently not building or not installing --- the
+    # _output\*.dll artifact glob below would happily upload a drop without it.
+    - name: Verify DLSS-NR trampoline was produced
+      shell: pwsh
+      run: |
+        if (-not (Test-Path _output\remix_nvngx.dll)) {
+          Write-Error "remix_nvngx.dll missing from _output --- the DLSS-NR trampoline did not build or did not install." -ErrorAction Stop
+        }
+        if (-not (Test-Path _output\d3d9.dll)) {
+          Write-Error "d3d9.dll missing from _output --- the runtime did not build or did not install." -ErrorAction Stop
+        }
+        Get-ChildItem _output\d3d9.dll, _output\remix_nvngx.dll | Format-Table Name, Length, LastWriteTime
+
+    - name: Copy readme
+      run: copy artifacts_readme.txt _output
+
+    # Uploads the flat x64 shape: d3d9.dll (rename to d3d9-remix.dll for the Dolphin Remix
+    # backend) and remix_nvngx.dll both land at the top level of _output.
+    - name: Upload x64 binaries
+      uses: actions/upload-artifact@v7
+      with:
+        name: rtx-remix-dlssnr-x64-${{github.run_number}}-${{env.GITHUB_SHA_SHORT}}-${{matrix.build-flavour}}
+        path: |
+          _output\*.dll
+          _output\*.pdb
+          _output\*.txt
+          _output\usd\*

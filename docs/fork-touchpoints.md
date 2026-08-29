@@ -3916,3 +3916,139 @@ Note: user rtx.conf files carrying `rtx.atmosphere.nubis3SunNearFieldKm` will lo
 harmless unknown-option warning.
 
 ---
+
+## Workstream - DLSS-NR (NGX feature 18) neural rendering pass (fork - 2026-08-29)
+
+Ports NVIDIA's DLSS Neural Rendering integration (`nvngx_dlssnr.dll`, NGX feature 18)
+onto Remix Plus as a post-pass that runs after the upscaler and the RCAS sharpener and
+before every post-process. Motivated by the Dolphin GameCube/Wii emulator's Remix video
+backend, which targets the Remix Plus ABI line (`REMIXAPI_VERSION_MINOR = 1000`) and
+rejects a stock NVIDIA runtime with `INCOMPATIBLE_VERSION`.
+
+The pass is exclusively `NVSDK_NGX_VULKAN_*` and sits downstream of the point where the
+Remix API path and the D3D9 path converge on the same `RtxContext`, so it behaves
+identically whether geometry arrives from D3D9 interception or from `remixapi_*`.
+
+**Every upstream edit is an insertion; the port deletes nothing** (235 insertions,
+0 deletions across the 11 upstream files below).
+
+**The snippet is loaded with `LoadLibraryW` + `GetProcAddress`, never through the
+driver's `nvngx.dll`**, which would Authenticode-verify a patched snippet and enforce its
+`NGXMinimumDriverVersion` / `NGXGpuArchitecture` resource strings. Gated snippet exports
+resolve their *caller's* module from the return address and require the substring
+`nvngx.dll` in that path, which is what `src/dlssnr_shim/remix_nvngx.dll` exists to
+satisfy - its forwarders must make a real `call`, not a tail `jmp`, or the original
+caller's frame survives and defeats the check.
+
+### Fork-owned files (not upstream touches)
+
+- `src/dxvk/rtx_render/rtx_neural_rendering.cpp/.h` - `DxvkNeuralRendering`, the
+  `RtxPass` that owns the proxy/neural targets, the `rtx.neuralRendering.*` options and
+  the ImGui panel. Named after its subsystem to match upstream `rtx_ngx_wrapper.*` rather
+  than taking the `rtx_fork_*` prefix, so the file stays diffable against the proven
+  NVIDIA tree it was ported from.
+- `src/dxvk/rtx_render/rtx_ngx_neural_rendering.cpp/.h` - `NgxNeuralRenderingSnippet`,
+  the snippet loader and NGX feature wrapper. Carries its own `viewToResourceVK` /
+  `textureToResourceVK` helpers because the equivalents in `rtx_ngx_wrapper.cpp` are
+  file-static in an unnamed namespace and were never externally callable.
+- `src/dxvk/shaders/rtx/pass/neural_rendering/` - `neural_rendering.h`,
+  `neural_rendering_codec.slangh`, `neural_rendering_encode.comp.slang`,
+  `neural_rendering_decode.comp.slang`. The HDR codec: encode a display-referred FP16
+  proxy, evaluate on the proxy, decode as a residual (`o + (n - p) / s`, bit-exact
+  identity when `n == p`). Feeding the network raw linear path-traced radiance is what
+  produced the original broken-colour bug. No meson registration needed - the shader
+  build is directory-driven (`-input rtx_shader_source_directory`) and
+  `compile_shaders.py` walks it recursively.
+- `src/dlssnr_shim/remix_nvngx.cpp` + `meson.build` - the call trampoline.
+  **The module name is load-bearing and must not be renamed.**
+- `tools/patch_dlssnr.py` - standalone snippet patcher; not referenced by any meson file.
+- `.github/workflows/build-dlssnr.yml` - fork-friendly CI. Runner image, submodules,
+  pinned Meson, the Pillow install, the `update-dlss-dlls.ps1` fetch and the `PerformBuild`
+  invocation are kept identical to `build.yml`; it differs only in triggering on every
+  branch, dropping the debug leg, the bridge/x86 artifact and the Slack job, and adding a
+  step that fails the build if `remix_nvngx.dll` is missing from `_output`.
+
+### Upstream files touched
+
+- **`meson.build`** (root) - inline tweak, +14.
+  *Adds an `install_file_in_dir.bat` script deploying `src/dlssnr_shim/remix_nvngx.dll`
+  into every copy target's output dir, beside `d3d9.dll`. Deliberately not wrapped in the
+  `if t != '_output'` guard the `d3d9.dll` copy above it uses; that guard is a no-op (`t`
+  is left over from the earlier `foreach t, exe : dxvkrt_output_targets` loop and is never
+  `'_output'` at that point) and copying it would only obscure the intent.*
+
+- **`src/meson.build`** - inline tweak, +3.
+  *Adds `subdir('dlssnr_shim')` after `subdir('dxvk')`.*
+
+- **`src/dxvk/meson.build`** - inline tweak, +4.
+  *Registers the four `rtx_neural_rendering.*` / `rtx_ngx_neural_rendering.*` sources in
+  the existing alphabetical `dxvk_src` list. No new dependency needed.*
+
+- **`src/dxvk/dxvk_objects.h`** - inline tweak, +12.
+  *Includes `rtx_neural_rendering.h`, adds the `metaNeuralRendering()` accessor and the
+  `Active<DxvkNeuralRendering> m_neuralRendering` member.*
+
+- **`src/dxvk/dxvk_device.cpp`** - inline tweak, +6.
+  *Constructs `m_neuralRendering` in the `DxvkObjects` ctor init list, and calls its
+  `onDestroy()` in the `DxvkObjects::onDestroy()` sweep. Position in that sweep is
+  load-bearing: it must release its NGX handle **before** the shared NGX context torn down
+  by the `m_rayReconstruction` / `m_dlss` / `m_dlfg` entries below it, so it is inserted
+  immediately before `m_rayReconstruction`, leaving the fork's own `m_fsrFrameGen` last.*
+
+- **`src/dxvk/rtx_render/rtx_types.h`** - inline tweak, +1.
+  *Adds `NeuralRendering` to `RtxFramePassStage`, between `TAA` and `DustParticles`. The
+  enum order is the frame's pass order for the resource-aliasing debug tool, so the slot
+  must match where the dispatch actually runs; appending at the end would break that tool's
+  purpose. Known side effect, identical to upstream's: this shifts `DustParticles`..`FrameEnd`
+  by +1, so a pre-existing `rtx.aliasing.beginPass`/`endPass` in an `rtx.conf` naming one of
+  those selects its neighbour. `REMIX_DEVELOPMENT`-only debug tool.*
+
+- **`src/dxvk/imgui/dxvk_imgui.cpp`** - inline tweak, +9.
+  *Adds the `NeuralRendering` row to the frame-pass-stage name table (kept index-parallel
+  with the enum above), and the "Neural Rendering" settings panel entry immediately after
+  the TAA-U block, ahead of every other post-process.*
+
+- **`src/dxvk/rtx_render/rtx_context.h`** - inline tweak, +1.
+  *Declares `dispatchNeuralRendering`.*
+
+- **`src/dxvk/rtx_render/rtx_context.cpp`** - inline tweak, +10.
+  *Defines `dispatchNeuralRendering` next to `dispatchRayReconstruction`, and calls it in
+  `injectRTX` after `fork_hooks::dispatchRcasSharpening` / `m_previousUpscaler = ...` and
+  before `RtxDustParticles`. Placement after RCAS is deliberate and fork-specific: RCAS
+  belongs to the upscale resolve (`rtx_fork_rcas.cpp` only runs for the upscalers that do
+  not sharpen themselves, and writes back into `m_finalOutput`), so calling DLSS-NR before
+  it would feed the network a pre-sharpen image under DLSS/DLSS-RR/XeSS/TAA-U but a
+  post-sharpen one under FSR/NIS. After it, the contract is uniform: fully resolved and
+  sharpened, still linear HDR, nothing post-processed yet. It must stay before
+  `dispatchToneMapping` - the snippet is a display-referred network fed an encoded proxy.*
+
+- **`src/dxvk/rtx_render/rtx_auto_exposure.cpp`** - inline tweak, +34 (11 LOC of code plus
+  a 20-line comment; over the nominal 20-LOC inline cap on raw line count, but a hook for
+  an 11-line clear in the middle of a resource-creation function would be worse, so it is
+  left inline).
+  *`createResources()` now clears `m_exposure` to 1.0 after transitioning it to
+  `VK_IMAGE_LAYOUT_GENERAL`. Without this the image is only transitioned out of
+  `VK_IMAGE_LAYOUT_UNDEFINED` and never written, so three readers sample uninitialised
+  memory before the first `dispatch`: the DLSS indicator, the DLSS-NR codec (which
+  **divides** by it - a zero read becomes the clamp floor and the decode's reciprocal turns
+  the whole frame white), and any frame spent in `DEBUG_VIEW_PRE_TONEMAP_OUTPUT`. More
+  likely to fire here than upstream: `createResources()` is only called from the DLSS /
+  DLSS-RR / XeSS / FSR branches of the upscaler chain, so a user on NIS, TAA-U or no
+  upscaler at all reaches the DLSS-NR pass as the first thing to touch the texture. Uses
+  the literal `1.0f` rather than upstream's `exp2f(0.0f)` - same number, matches the
+  convention `dispatchAutoExposure()` below it already uses, and avoids adding a `<cmath>`
+  dependency this file does not otherwise have.*
+
+- **`README.md`** - inline tweak, +141.
+  *Prepends the DLSS-NR install/verify/settings section, including the `d3d9-remix.dll`
+  rename the Dolphin backend requires.*
+
+Note: the port's one behavioural adaptation is in fork-owned code, not an upstream file.
+`DxvkNeuralRendering::calcProxyScale()` upstream reads
+`trackAutoExposure() ? exp2f(RtxOptions::calcUserEVBias()) : 1.0f`; Remix Plus has no
+user-brightness concept at all (`calcUserEVBias`, `rtx.userBrightness` and
+`rtx.userBrightnessEVRange` do not exist anywhere in this fork, and its tonemapper uses
+`exp2f(exposureBias())` alone), so that static term collapses to `1.0f` - which is also
+what the upstream expression evaluates to at the default `userBrightness` of 50. The
+scene-adaptive half is untouched: `trackAutoExposure()` still gates the `autoExposureEnabled`
+push constant that applies the auto-exposure texture inside the shaders.
